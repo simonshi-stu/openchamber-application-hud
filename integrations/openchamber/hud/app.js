@@ -1,5 +1,6 @@
 import { connectHost } from '@openchamber/sdk';
 import { applyHostReady } from '@openchamber/sdk/ui';
+import { createSessionDeliveryTracker } from '../session-delivery.js';
 import {
   COMMAND,
   buildCommandRequest,
@@ -53,6 +54,7 @@ function start() {
     commandBusy: false,
     messageBusy: false,
     inboxBusy: false,
+    deliveryTracker: createSessionDeliveryTracker(),
     sessionSwitchBusy: false,
     sessionSwitchTarget: null,
     pollTimer: null,
@@ -195,6 +197,7 @@ function start() {
     state.sessionSwitchBusy = false;
     state.sessionSwitchTarget = null;
     state.messageNote = '发送到当前会话，不创建新对话。';
+    state.deliveryTracker.reset();
     clearPollTimer();
     clearInboxPollTimer();
     updateProjectLabel();
@@ -322,6 +325,7 @@ function start() {
       const response = await host.serviceRequest(buildSessionInboxRequest(directory));
       if (isInboxStale(generation, directory)) return;
       const { messages } = parseSessionInboxResponse(response);
+      state.deliveryTracker.reconcile(messages);
       const message = messages[0];
       if (!message) return;
 
@@ -351,17 +355,26 @@ function start() {
       }
       if (!canReceiveSessionMessage()) return;
 
-      state.messageNote = '正在把独立 HUD 消息发送到当前会话…';
+      const alreadySent = state.deliveryTracker.has(message.id);
+      state.messageNote = alreadySent
+        ? '正在确认已发送的独立 HUD 消息…'
+        : '正在把独立 HUD 消息发送到当前会话…';
       renderSession();
-      const result = await host.prompt({ text: message.text, send: true });
-      if (isInboxStale(generation, directory)) return;
-      if (result.sent !== 'sent') {
+      const result = await state.deliveryTracker.sendAndAcknowledge({
+        message,
+        prompt: (text) => host.prompt({ text, send: true }),
+        acknowledge: async (messageId) => {
+          const acknowledged = await host.serviceRequest(buildSessionInboxAckRequest(directory, [messageId]));
+          if (isInboxStale(generation, directory)) return;
+          parseSessionInboxAckResponse(acknowledged);
+        },
+        isCurrent: () => !isInboxStale(generation, directory),
+      });
+      if (result.status === 'stale') return;
+      if (result.status === 'not-sent') {
         state.messageNote = promptResultMessage(result.sent);
         return;
       }
-      const acknowledged = await host.serviceRequest(buildSessionInboxAckRequest(directory, [message.id]));
-      if (isInboxStale(generation, directory)) return;
-      parseSessionInboxAckResponse(acknowledged);
       state.messageNote = '已从独立 HUD 转发到当前会话，不会创建新对话。';
     } catch (error) {
       if (!isInboxStale(generation, directory)) {
