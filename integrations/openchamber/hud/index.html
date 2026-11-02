@@ -97,6 +97,17 @@
               <button id="send-message-button" class="button primary" type="submit">发送</button>
             </div>
           </form>
+          <div id="delivery-review" class="delivery-review" role="region" aria-live="polite" hidden>
+            <strong id="delivery-review-title">桥接消息待人工核对</strong>
+            <p id="delivery-review-message" class="muted small">
+              宿主没有提供可靠的送达结论；不会自动重发或丢弃这条消息。
+            </p>
+            <div class="control-row">
+              <button id="delivery-confirm-button" class="button outline" type="button">确认已送达，移除待处理项</button>
+              <button id="delivery-retry-button" class="button primary" type="button">确认未送达，允许单次重试</button>
+              <button id="delivery-open-target-button" class="button outline" type="button" hidden>打开目标会话</button>
+            </div>
+          </div>
         </section>
       </main>
     </div>

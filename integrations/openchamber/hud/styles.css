@@ -434,6 +434,29 @@ textarea:focus {
   white-space: nowrap;
 }
 
+.delivery-review {
+  margin-top: 10px;
+  padding: 9px;
+  border: 1px solid color-mix(in srgb, var(--hud-warning) 45%, var(--hud-border));
+  border-radius: calc(var(--hud-radius) - 2px);
+  background: color-mix(in srgb, var(--hud-warning) 8%, var(--hud-elevated));
+}
+
+.delivery-review strong {
+  display: block;
+  color: var(--hud-warning);
+  font-size: 12px;
+}
+
+.delivery-review p {
+  margin-top: 3px;
+  overflow-wrap: anywhere;
+}
+
+.delivery-review .control-row {
+  margin-top: 8px;
+}
+
 .sr-only {
   position: absolute;
   width: 1px;

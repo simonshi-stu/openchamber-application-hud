@@ -41,9 +41,13 @@
  * send them to the current session and acknowledge them one at a time.
  * POST /api/session-inbox/ack
  *   { directory, messageIds }
+ * POST /api/session-inbox/state
+ *   { directory, messageIds, state: 'needs_review' | 'sent' | 'pending' }
  *
  * A queued message may carry `targetSessionId`; the HUD opens that exact
  * host session before calling `host.prompt`, then acknowledges only after send.
+ * `deliveryState: 'needs_review'` blocks automatic sending after an unknown
+ * host result; `deliveryState: 'sent'` permits only a local acknowledgement.
  *
  * WorkbenchState (only the fields the panel needs; unknown fields are ignored)
  * -------------------------------------------------------------------------
@@ -112,7 +116,16 @@ export const API_PATHS = Object.freeze({
   health: '/health',
   sessionInbox: '/api/session-inbox',
   sessionInboxAck: '/api/session-inbox/ack',
+  sessionInboxState: '/api/session-inbox/state',
 });
+
+export const SESSION_DELIVERY_STATE = Object.freeze({
+  pending: 'pending',
+  sent: 'sent',
+  needsReview: 'needs_review',
+});
+
+export const SESSION_DELIVERY_STATES = Object.freeze(Object.values(SESSION_DELIVERY_STATE));
 
 export const COMMAND_PREFIX = Object.freeze({
   user: 'user.',
@@ -542,6 +555,25 @@ export function buildSessionInboxAckRequest(directory, messageIds) {
     method: 'POST',
     path: API_PATHS.sessionInboxAck,
     body: JSON.stringify({ directory: dir, messageIds: ids }),
+  };
+}
+
+export function buildSessionInboxStateRequest(directory, messageIds, state) {
+  const dir = requireString(directory, 'directory', { max: 1024 });
+  if (!Array.isArray(messageIds) || messageIds.length < 1 || messageIds.length > 100) {
+    throw new ContractError('INVALID_SESSION_MESSAGE_IDS', '会话桥接状态 ID 列表必须包含 1～100 项。');
+  }
+  const ids = messageIds.map((id) => requireString(id, 'messageId', { max: 128 }));
+  if (new Set(ids).size !== ids.length) {
+    throw new ContractError('INVALID_SESSION_MESSAGE_IDS', '会话桥接状态 ID 不能重复。');
+  }
+  if (!SESSION_DELIVERY_STATES.includes(state)) {
+    throw new ContractError('INVALID_SESSION_DELIVERY_STATE', '会话桥接送达状态无效。');
+  }
+  return {
+    method: 'POST',
+    path: API_PATHS.sessionInboxState,
+    body: JSON.stringify({ directory: dir, messageIds: ids, state }),
   };
 }
 
@@ -1041,7 +1073,19 @@ export function parseSessionInboxResponse(result) {
     }
     const createdAt = requireString(message.createdAt, `session.messages[${index}].createdAt`, { max: 80 });
     const targetSessionId = optionalString(message.targetSessionId, `session.messages[${index}].targetSessionId`, 128);
-    return { id, text, createdAt, targetSessionId: targetSessionId || null };
+    const deliveryState = Object.hasOwn(message, 'deliveryState')
+      ? message.deliveryState
+      : SESSION_DELIVERY_STATE.pending;
+    if (!SESSION_DELIVERY_STATES.includes(deliveryState)) {
+      throw new ContractError('INVALID_SESSION_INBOX_RESPONSE', `会话桥接消息 ${index + 1} 的送达状态无效。`);
+    }
+    return {
+      id,
+      text,
+      createdAt,
+      targetSessionId: targetSessionId || null,
+      deliveryState,
+    };
   });
   if (new Set(messages.map((message) => message.id)).size !== messages.length) {
     throw new ContractError('INVALID_SESSION_INBOX_RESPONSE', '会话桥接消息 ID 不能重复。');
@@ -1055,6 +1099,14 @@ export function parseSessionInboxAckResponse(result) {
     throw new ContractError('INVALID_SESSION_INBOX_RESPONSE', '会话桥接确认响应无效。');
   }
   return { acknowledged: body.acknowledged };
+}
+
+export function parseSessionInboxStateResponse(result) {
+  const body = decodeServiceResponse(result);
+  if (!Number.isInteger(body.updated) || body.updated < 0 || body.updated > 100) {
+    throw new ContractError('INVALID_SESSION_INBOX_RESPONSE', '会话桥接状态响应无效。');
+  }
+  return { updated: body.updated };
 }
 
 function requireRevision(value) {

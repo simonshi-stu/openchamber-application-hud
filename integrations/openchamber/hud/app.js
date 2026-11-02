@@ -7,10 +7,12 @@ import {
   buildStateRequest,
   buildSessionInboxAckRequest,
   buildSessionInboxRequest,
+  buildSessionInboxStateRequest,
   countUnresolvedIssues,
   parseCommandResponse,
   parseSessionInboxAckResponse,
   parseSessionInboxResponse,
+  parseSessionInboxStateResponse,
   parseStateResponse,
   queueStateMeta,
   statusMeta,
@@ -44,6 +46,7 @@ function start() {
     contextDirectory: null,
     directoryInitialized: false,
     generation: 0,
+    sessionEpoch: 0,
     requestSeq: 0,
     loadStatus: 'idle',
     loadError: null,
@@ -56,10 +59,15 @@ function start() {
     inboxBusy: false,
     deliveryTracker: createSessionDeliveryTracker(),
     sessionSwitchBusy: false,
+    sessionSwitchRequestPending: false,
     sessionSwitchTarget: null,
     pollTimer: null,
     inboxPollTimer: null,
     messageNote: '发送到当前会话，不创建新对话。',
+    deliveryReview: null,
+    deliveryTarget: null,
+    manualRetryMessageId: null,
+    manualRetryContext: null,
     preserveDirectoryDuringSessionSwitch: false,
   };
 
@@ -93,6 +101,12 @@ function start() {
     sessionMessage: document.querySelector('#session-message'),
     sendMessageButton: document.querySelector('#send-message-button'),
     messageNote: document.querySelector('#message-note'),
+    deliveryReview: document.querySelector('#delivery-review'),
+    deliveryReviewTitle: document.querySelector('#delivery-review-title'),
+    deliveryReviewMessage: document.querySelector('#delivery-review-message'),
+    deliveryConfirmButton: document.querySelector('#delivery-confirm-button'),
+    deliveryRetryButton: document.querySelector('#delivery-retry-button'),
+    deliveryOpenTargetButton: document.querySelector('#delivery-open-target-button'),
   };
 
   const hostTimer = window.setTimeout(() => {
@@ -119,11 +133,22 @@ function start() {
     event.preventDefault();
     void sendMessage();
   });
+  el.deliveryConfirmButton.addEventListener('click', () => {
+    void confirmDeliveryReview();
+  });
+  el.deliveryRetryButton.addEventListener('click', () => {
+    void retryDeliveryReview();
+  });
+  el.deliveryOpenTargetButton.addEventListener('click', () => {
+    void openDeliveryTarget();
+  });
 
   host.onReady((ctx) => {
     applyHostReady(ctx, document.documentElement);
     state.hostReady = true;
+    state.sessionEpoch += 1;
     state.session = ctx.session ?? null;
+    refreshDeliverySessionContext();
     clearTimeout(hostTimer);
     if (!state.initialized) {
       state.initialized = true;
@@ -141,6 +166,8 @@ function start() {
       return;
     }
     if (state.preserveDirectoryDuringSessionSwitch && ctx.session?.id === state.sessionSwitchTarget) {
+      state.sessionSwitchRequestPending = false;
+      state.sessionSwitchBusy = false;
       state.preserveDirectoryDuringSessionSwitch = false;
       state.sessionSwitchTarget = null;
       render();
@@ -159,13 +186,15 @@ function start() {
   });
 
   host.onSession((session) => {
+    state.sessionEpoch += 1;
     state.session = session ?? null;
     state.sessionPhase = null;
     if (state.sessionSwitchTarget && state.session?.id === state.sessionSwitchTarget) {
-      state.sessionSwitchBusy = false;
+      if (!state.sessionSwitchRequestPending) state.sessionSwitchBusy = false;
       if (!state.preserveDirectoryDuringSessionSwitch) state.sessionSwitchTarget = null;
       state.messageNote = '已切换到指定会话，等待桥接消息发送。';
     }
+    refreshDeliverySessionContext();
     renderSession();
     scheduleInboxPoll(0);
   });
@@ -195,8 +224,13 @@ function start() {
     state.loadStatus = nextDirectory ? 'loading' : 'no-directory';
     state.inboxBusy = false;
     state.sessionSwitchBusy = false;
+    state.sessionSwitchRequestPending = false;
     state.sessionSwitchTarget = null;
     state.messageNote = '发送到当前会话，不创建新对话。';
+    state.deliveryReview = null;
+    state.deliveryTarget = null;
+    state.manualRetryMessageId = null;
+    state.manualRetryContext = null;
     state.deliveryTracker.reset();
     clearPollTimer();
     clearInboxPollTimer();
@@ -312,81 +346,306 @@ function start() {
     }
   }
 
-  async function pollSessionInbox() {
+  async function pollSessionInbox({ manualRetryMessageId = null, manualRetryContext = null } = {}) {
     if (!state.hostReady || !state.directory) {
       scheduleInboxPoll();
       return;
     }
+    const requestedRetryId = manualRetryMessageId ?? state.manualRetryMessageId;
+    const isManualRetry = typeof requestedRetryId === 'string' && requestedRetryId.length > 0;
+    const retryContext = manualRetryContext ?? state.manualRetryContext;
     const generation = state.generation;
     const directory = state.directory;
+    const sessionEpoch = state.sessionEpoch;
+    const sessionId = currentSessionId();
+    let message = null;
     state.inboxBusy = true;
     renderSession();
     try {
       const response = await host.serviceRequest(buildSessionInboxRequest(directory));
-      if (isInboxStale(generation, directory)) return;
+      if (isInboxStale(generation, directory, sessionEpoch, sessionId)) return;
       const { messages } = parseSessionInboxResponse(response);
       state.deliveryTracker.reconcile(messages);
-      const message = messages[0];
-      if (!message) return;
-
-      if (message.targetSessionId && state.session?.id !== message.targetSessionId) {
-        if (state.sessionSwitchBusy) return;
-        state.sessionSwitchBusy = true;
-        state.sessionSwitchTarget = message.targetSessionId;
-        state.messageNote = `正在打开指定会话 ${message.targetSessionId}…`;
-        renderSession();
-        try {
-          state.preserveDirectoryDuringSessionSwitch = true;
-          await host.openSession(message.targetSessionId);
-          if (!isInboxStale(generation, directory) && state.session?.id === message.targetSessionId) {
-            state.sessionSwitchBusy = false;
-            state.sessionSwitchTarget = null;
-            state.preserveDirectoryDuringSessionSwitch = false;
-          }
-        } catch (error) {
-          if (!isInboxStale(generation, directory)) {
-            state.sessionSwitchBusy = false;
-            state.sessionSwitchTarget = null;
-            state.preserveDirectoryDuringSessionSwitch = false;
-            state.messageNote = `无法打开指定会话：${friendlyError(error)}`;
-          }
+      message = isManualRetry
+        ? messages.find((item) => item.id === requestedRetryId) ?? null
+        : messages[0] ?? null;
+      if (!message) {
+        if (isManualRetry) {
+          state.messageNote = `指定消息 ${requestedRetryId} 已不在本地队列，未操作其他消息。`;
+        } else {
+          state.deliveryReview = null;
+          state.deliveryTarget = null;
         }
         return;
       }
+      if (message.targetSessionId && currentSessionId() !== message.targetSessionId) {
+        state.deliveryTarget = createDeliveryContext(message, generation);
+        state.deliveryReview = message.deliveryState === 'needs_review'
+          ? state.deliveryTarget
+          : null;
+        state.messageNote = message.deliveryState === 'needs_review'
+          ? `送达结果未知；请先打开目标会话 ${message.targetSessionId}，不会在当前会话确认或重试。`
+          : `消息目标为会话 ${message.targetSessionId}；请先明确打开该已有会话，不会创建会话或发送。`;
+        return;
+      }
+      state.deliveryTarget = null;
+      if (isManualRetry && message.deliveryState !== 'needs_review') {
+        state.deliveryReview = createDeliveryContext(
+          { ...message, deliveryState: 'conflict' },
+          generation,
+        );
+        state.messageNote = '消息状态已变化，未执行指定 ID 的人工重试；仍需重新核对。';
+        return;
+      }
+      if (message.deliveryState === 'needs_review' && !isManualRetry) {
+        state.deliveryReview = createDeliveryContext(message, generation);
+        state.messageNote = message.targetSessionId
+          ? '消息送达结果未知，已暂停；请核对指定目标会话，不会自动重发或丢弃。'
+          : '消息送达结果未知，已暂停；原消息没有可证明的目标会话，不会猜测当前会话。';
+        return;
+      }
+      if (isManualRetry && !isDeliveryActionCurrent(retryContext)) return;
       if (!canReceiveSessionMessage()) return;
 
-      const alreadySent = state.deliveryTracker.has(message.id);
-      state.messageNote = alreadySent
-        ? '正在确认已发送的独立 HUD 消息…'
-        : '正在把独立 HUD 消息发送到当前会话…';
+      const alreadySent = state.deliveryTracker.has(message.id) || message.deliveryState === 'sent';
+      state.messageNote = isManualRetry
+        ? '正在按本人授权对指定消息执行一次人工重试…'
+        : alreadySent
+          ? '正在确认已发送的独立 HUD 消息…'
+          : '正在把独立 HUD 消息发送到当前会话…';
       renderSession();
+      const isCurrent = () => (
+        !isInboxStale(generation, directory, sessionEpoch, sessionId)
+        && (!isManualRetry || isDeliveryActionCurrent(retryContext))
+      );
       const result = await state.deliveryTracker.sendAndAcknowledge({
         message,
+        manualRetry: isManualRetry,
+        prepare: async (messageId) => {
+          const prepared = await host.serviceRequest(
+            buildSessionInboxStateRequest(directory, [messageId], 'needs_review'),
+          );
+          if (!isCurrent()) return { updated: 0 };
+          return parseSessionInboxStateResponse(prepared);
+        },
         prompt: (text) => host.prompt({ text, send: true }),
+        markSent: async (messageId) => {
+          const marked = await host.serviceRequest(
+            buildSessionInboxStateRequest(directory, [messageId], 'sent'),
+          );
+          if (!isCurrent()) return { updated: 0 };
+          return parseSessionInboxStateResponse(marked);
+        },
+        release: async (messageId) => {
+          const released = await host.serviceRequest(
+            buildSessionInboxStateRequest(directory, [messageId], 'pending'),
+          );
+          if (!isCurrent()) return { updated: 0 };
+          return parseSessionInboxStateResponse(released);
+        },
         acknowledge: async (messageId) => {
           const acknowledged = await host.serviceRequest(buildSessionInboxAckRequest(directory, [messageId]));
-          if (isInboxStale(generation, directory)) return;
+          if (!isCurrent()) return;
           parseSessionInboxAckResponse(acknowledged);
         },
-        isCurrent: () => !isInboxStale(generation, directory),
+        isCurrent,
       });
       if (result.status === 'stale') return;
+      if (result.status === 'conflict') {
+        state.deliveryReview = createDeliveryContext(
+          { ...message, deliveryState: 'needs_review' },
+          generation,
+        );
+        state.messageNote = '消息状态已变化，未执行指定 ID 的人工重试；仍待本人核对。';
+        return;
+      }
+      if (result.status === 'needs-review' || result.status === 'uncertain') {
+        state.deliveryReview = createDeliveryContext(
+          { ...message, deliveryState: 'needs_review' },
+          generation,
+        );
+        state.messageNote = '宿主没有可靠的送达结论，消息已停在待人工核对；不会自动重发或丢弃。';
+        return;
+      }
       if (result.status === 'not-sent') {
+        state.deliveryReview = null;
         state.messageNote = promptResultMessage(result.sent);
         return;
       }
-      state.messageNote = '已从独立 HUD 转发到当前会话，不会创建新对话。';
+      state.deliveryReview = null;
+      state.messageNote = isManualRetry
+        ? '指定消息已完成一次人工重试并确认消费，不会创建新对话。'
+        : '已从独立 HUD 转发到当前会话，不会创建新对话。';
     } catch (error) {
-      if (!isInboxStale(generation, directory)) {
-        state.messageNote = `会话桥接失败：${friendlyError(error)}`;
+      if (isInboxScopeCurrent(generation, directory)) {
+        state.messageNote = message?.deliveryState === 'sent' || state.deliveryTracker.has(message?.id)
+          ? `已送达消息的本地确认失败：${friendlyError(error)}；不会重发。`
+          : isManualRetry
+            ? `人工重试未执行：${friendlyError(error)}`
+            : `会话桥接失败：${friendlyError(error)}`;
       }
     } finally {
-      if (!isInboxStale(generation, directory)) {
+      if (isInboxScopeCurrent(generation, directory)) {
         state.inboxBusy = false;
+        if (isManualRetry && state.manualRetryMessageId === requestedRetryId) {
+          state.manualRetryMessageId = null;
+          state.manualRetryContext = null;
+        }
         renderSession();
         scheduleInboxPoll();
       }
     }
+  }
+
+  async function confirmDeliveryReview() {
+    const review = state.deliveryReview;
+    if (!canActOnDeliveryReview(review)) return;
+    const action = captureDeliveryActionContext(review);
+    const generation = state.generation;
+    const directory = state.directory;
+    state.inboxBusy = true;
+    state.messageNote = '正在按本人核对结果移除指定消息…';
+    renderSession();
+    try {
+      if (!isDeliveryActionCurrent(action)) return;
+      const response = await host.serviceRequest(buildSessionInboxAckRequest(directory, [action.messageId]));
+      if (!isDeliveryActionCurrent(action)) return;
+      const result = parseSessionInboxAckResponse(response);
+      state.deliveryReview = null;
+      state.deliveryTarget = null;
+      state.messageNote = result.acknowledged > 0
+        ? '已按本人确认移除指定消息；不会再次发送。'
+        : '指定消息已不在本地队列；不会再次发送。';
+    } catch (error) {
+      if (isInboxScopeCurrent(generation, directory) && isDeliveryActionCurrent(action)) {
+        state.messageNote = `人工核对处理失败：${friendlyError(error)}`;
+      }
+    } finally {
+      if (isInboxScopeCurrent(generation, directory)) {
+        state.inboxBusy = false;
+        renderSession();
+        scheduleInboxPoll(0);
+      }
+    }
+  }
+
+  async function retryDeliveryReview() {
+    const review = state.deliveryReview;
+    if (!canActOnDeliveryReview(review)) return;
+    const action = captureDeliveryActionContext(review);
+    state.manualRetryMessageId = action.messageId;
+    state.manualRetryContext = action;
+    clearInboxPollTimer();
+    state.messageNote = '正在记录本人确认，准备一次人工重试…';
+    renderSession();
+    await pollSessionInbox({
+      manualRetryMessageId: action.messageId,
+      manualRetryContext: action,
+    });
+  }
+
+  async function openDeliveryTarget() {
+    const target = state.deliveryTarget || state.deliveryReview;
+    if (!target?.targetSessionId || !state.directory || state.sessionSwitchBusy) return;
+    if (target.reviewGeneration !== state.generation) return;
+    if (currentSessionId() === target.targetSessionId) return;
+    const generation = state.generation;
+    const directory = state.directory;
+    state.sessionSwitchBusy = true;
+    state.sessionSwitchRequestPending = true;
+    state.sessionSwitchTarget = target.targetSessionId;
+    state.preserveDirectoryDuringSessionSwitch = true;
+    state.messageNote = `正在打开指定会话 ${target.targetSessionId}；不会创建会话或发送消息…`;
+    renderSession();
+    try {
+      await host.openSession(target.targetSessionId);
+      if (!isInboxScopeCurrent(generation, directory)) return;
+      if (currentSessionId() === target.targetSessionId) {
+        state.sessionSwitchRequestPending = false;
+        state.sessionSwitchBusy = false;
+        state.sessionSwitchTarget = null;
+        state.preserveDirectoryDuringSessionSwitch = false;
+        state.messageNote = '已打开指定会话，等待重新核对桥接消息。';
+        scheduleInboxPoll(0);
+      } else {
+        state.messageNote = `已请求打开指定会话 ${target.targetSessionId}，等待宿主切换完成…`;
+      }
+    } catch (error) {
+      if (isInboxScopeCurrent(generation, directory)) {
+        state.sessionSwitchRequestPending = false;
+        state.sessionSwitchBusy = false;
+        state.sessionSwitchTarget = null;
+        state.preserveDirectoryDuringSessionSwitch = false;
+        state.messageNote = `无法打开指定会话：${friendlyError(error)}`;
+      }
+    } finally {
+      if (isInboxScopeCurrent(generation, directory)) renderSession();
+    }
+  }
+
+  function createDeliveryContext(message, generation) {
+    return {
+      ...message,
+      reviewGeneration: generation,
+      reviewSessionEpoch: state.sessionEpoch,
+      reviewSessionId: currentSessionId(),
+    };
+  }
+
+  function refreshDeliverySessionContext() {
+    if (state.deliveryReview) {
+      state.deliveryReview = {
+        ...state.deliveryReview,
+        reviewSessionEpoch: state.sessionEpoch,
+        reviewSessionId: currentSessionId(),
+      };
+    }
+    if (state.deliveryTarget) {
+      state.deliveryTarget = {
+        ...state.deliveryTarget,
+        reviewSessionEpoch: state.sessionEpoch,
+        reviewSessionId: currentSessionId(),
+      };
+    }
+  }
+
+  function captureDeliveryActionContext(review) {
+    return {
+      messageId: review.id,
+      targetSessionId: review.targetSessionId,
+      reviewGeneration: review.reviewGeneration,
+      reviewSessionEpoch: state.sessionEpoch,
+      reviewSessionId: currentSessionId(),
+    };
+  }
+
+  function isDeliveryActionCurrent(action) {
+    const review = state.deliveryReview;
+    return Boolean(
+      action
+      && review
+      && review.id === action.messageId
+      && review.deliveryState === 'needs_review'
+      && review.reviewGeneration === state.generation
+      && action.reviewGeneration === state.generation
+      && review.targetSessionId === action.targetSessionId
+      && action.reviewSessionEpoch === state.sessionEpoch
+      && action.reviewSessionId === currentSessionId()
+      && action.targetSessionId
+      && currentSessionId() === action.targetSessionId
+      && !state.sessionSwitchBusy
+      && canReceiveSessionMessage(),
+    );
+  }
+
+  function canActOnDeliveryReview(review) {
+    return Boolean(review && !state.inboxBusy && isDeliveryActionCurrent({
+      messageId: review.id,
+      targetSessionId: review.targetSessionId,
+      reviewGeneration: review.reviewGeneration,
+      reviewSessionEpoch: state.sessionEpoch,
+      reviewSessionId: currentSessionId(),
+    }));
   }
 
   function isStale(generation, requestSeq, directory) {
@@ -438,8 +697,18 @@ function start() {
     );
   }
 
-  function isInboxStale(generation, directory) {
-    return generation !== state.generation || directory !== state.directory;
+  function currentSessionId() {
+    return typeof state.session?.id === 'string' && state.session.id ? state.session.id : null;
+  }
+
+  function isInboxScopeCurrent(generation, directory) {
+    return generation === state.generation && directory === state.directory;
+  }
+
+  function isInboxStale(generation, directory, sessionEpoch = null, sessionId = null) {
+    return !isInboxScopeCurrent(generation, directory)
+      || (sessionEpoch !== null
+        && (sessionEpoch !== state.sessionEpoch || sessionId !== currentSessionId()));
   }
 
   function render() {
@@ -558,6 +827,35 @@ function start() {
     el.sessionMessage.disabled = !session || state.messageBusy;
     el.sendMessageButton.disabled = !session || state.messageBusy || state.inboxBusy;
     el.sendMessageButton.textContent = state.messageBusy || state.inboxBusy ? '发送中…' : '发送';
+    const review = state.deliveryReview;
+    const target = state.deliveryTarget;
+    const delivery = review || target;
+    const targetSessionId = delivery?.targetSessionId || null;
+    const currentSession = currentSessionId();
+    const targetMatches = Boolean(targetSessionId && targetSessionId === currentSession);
+    const reviewActionsEnabled = Boolean(review && canActOnDeliveryReview(review));
+    el.deliveryReview.hidden = !delivery;
+    el.deliveryReviewTitle.textContent = review ? '桥接消息待人工核对' : '桥接消息等待目标会话';
+    el.deliveryReviewMessage.textContent = delivery
+      ? [
+        `消息 ID：${delivery.id}`,
+        `目标会话：${targetSessionId || '无法证明（旧消息未绑定目标会话）'}`,
+        `当前会话：${currentSession || '无'}`,
+        `内容摘要：${messageSummary(delivery.text)}`,
+        review
+          ? targetMatches
+            ? '送达结果未知；请本人确认已送达或允许一次人工重试。'
+            : '送达结果未知；目标不匹配时禁止确认或重试。'
+          : '请先明确打开该已有目标会话；不会创建会话或发送消息。',
+      ].join(' · ')
+      : '';
+    el.deliveryConfirmButton.disabled = !reviewActionsEnabled;
+    el.deliveryRetryButton.disabled = !reviewActionsEnabled;
+    el.deliveryOpenTargetButton.hidden = !targetSessionId || targetMatches;
+    el.deliveryOpenTargetButton.disabled = !targetSessionId
+      || targetMatches
+      || state.inboxBusy
+      || state.sessionSwitchBusy;
   }
 
   function renderBanner() {
@@ -567,6 +865,15 @@ function start() {
     }
     if (state.loadStatus === 'error' && state.loadError) {
       showBanner('error', friendlyError(state.loadError));
+      return;
+    }
+    if (state.deliveryReview || state.deliveryTarget) {
+      showBanner(
+        'warning',
+        state.deliveryReview
+          ? '会话桥接消息送达结果未知，已暂停等待本人核对。'
+          : '会话桥接消息绑定了其他会话；不会在当前会话发送。',
+      );
       return;
     }
     if (state.workbench?.recoveryPending) {
@@ -625,6 +932,12 @@ function basename(value) {
   return parts[parts.length - 1] || value;
 }
 
+function messageSummary(value, maxLength = 180) {
+  const normalized = typeof value === 'string' ? value.replace(/\s+/gu, ' ').trim() : '';
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, maxLength - 1)}…`;
+}
+
 function promptResultMessage(sent) {
   if (sent === 'no-model') return '当前会话没有可用模型，消息未发送。';
   if (sent === 'skipped') return '宿主跳过了本次发送，消息未发送。';
@@ -647,6 +960,8 @@ function friendlyError(error) {
     SESSION_INBOX_BUSY: '会话桥接队列正由另一个窗口更新，请稍后重试。',
     INVALID_SESSION_INBOX_RESPONSE: '会话桥接响应无效，消息仍保留在队列中。',
     INVALID_SESSION_ID: '目标会话 ID 无效，消息仍保留在队列中。',
+    INVALID_SESSION_DELIVERY_STATE: '会话桥接送达状态无效，消息仍保留在队列中。',
+    SESSION_DELIVERY_CONFLICT: '消息状态已变化，未执行重试。',
   };
   return messages[code] || (typeof error?.message === 'string' && error.message ? error.message : '操作失败，请刷新后重试。');
 }

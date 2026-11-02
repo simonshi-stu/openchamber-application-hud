@@ -15,6 +15,7 @@ import {
   buildCommandRequest,
   buildSessionInboxAckRequest,
   buildSessionInboxRequest,
+  buildSessionInboxStateRequest,
   buildStateRequest,
   countUnresolvedIssues,
   describeCompanyApplication,
@@ -26,6 +27,7 @@ import {
   parseCommandResponse,
   parseSessionInboxAckResponse,
   parseSessionInboxResponse,
+  parseSessionInboxStateResponse,
   parseStateResponse,
   statusMeta,
 } from './contract.js';
@@ -106,6 +108,14 @@ test('session inbox requests preserve message text and validate acknowledgements
     directory: 'E:/demo/project',
     messageIds: ['message-1'],
   });
+  const state = buildSessionInboxStateRequest('E:/demo/project', ['message-1'], 'needs_review');
+  assert.equal(state.method, 'POST');
+  assert.equal(state.path, '/api/session-inbox/state');
+  assert.deepEqual(JSON.parse(state.body), {
+    directory: 'E:/demo/project',
+    messageIds: ['message-1'],
+    state: 'needs_review',
+  });
   assert.throws(
     () => buildSessionInboxAckRequest('E:/demo/project', ['message-1', 'message-1']),
     error => error.code === 'INVALID_SESSION_MESSAGE_IDS',
@@ -124,9 +134,33 @@ test('session inbox requests preserve message text and validate acknowledgements
   });
   assert.deepEqual(response.messages[0].text, '  保留原文  ');
   assert.equal(response.messages[0].targetSessionId, 'ses_virtual_test');
+  assert.equal(response.messages[0].deliveryState, 'pending');
+  assert.equal(
+    parseSessionInboxResponse({
+      status: 200,
+      body: JSON.stringify({
+        ok: true,
+        messages: [{
+          id: 'message-2',
+          text: '虚构消息',
+          createdAt: '2026-10-28T00:00:00.000Z',
+          deliveryState: 'needs_review',
+        }],
+      }),
+    }).messages[0].deliveryState,
+    'needs_review',
+  );
   assert.deepEqual(
     parseSessionInboxAckResponse({ status: 200, body: JSON.stringify({ ok: true, acknowledged: 1 }) }),
     { acknowledged: 1 },
+  );
+  assert.deepEqual(
+    parseSessionInboxStateResponse({ status: 200, body: JSON.stringify({ ok: true, updated: 1 }) }),
+    { updated: 1 },
+  );
+  assert.throws(
+    () => buildSessionInboxStateRequest('E:/demo/project', ['message-1'], 'unknown'),
+    error => error.code === 'INVALID_SESSION_DELIVERY_STATE',
   );
 });
 

@@ -36,6 +36,7 @@ import {
   appendSessionMessage,
   readSessionInbox,
   SessionInboxError,
+  updateSessionMessageStates,
 } from '../session-bridge.js';
 
 const API_VERSION = 1;
@@ -2437,6 +2438,21 @@ export function createServiceServer(options = {}) {
     });
   }
 
+  async function updateSessionInboxState(directory, messageIds, state) {
+    const ctx = await getContext(directory);
+    return enqueueProjectTask(ctx, async () => {
+      try {
+        await validateProjectLayout(ctx.projectPath, { create: true });
+        return await updateSessionMessageStates(ctx.appRoot, messageIds, state);
+      } catch (error) {
+        if (error instanceof SessionInboxError) {
+          throw sessionInboxServiceError(error, 400);
+        }
+        throw error;
+      }
+    });
+  }
+
   async function runCommand(envelope) {
     const info = mapCommand(envelope.command);
     if (!info) {
@@ -2545,6 +2561,21 @@ export function createServiceServer(options = {}) {
         }
         const result = await acknowledgeSessionInbox(directory, body.messageIds);
         sendJson(res, 200, { ok: true, ...result });
+        return;
+      }
+
+      if (pathname === '/api/session-inbox/state') {
+        assertMethod(req, 'POST');
+        assertNoQuery(url);
+        const body = await readJsonBody(req);
+        assertOnlyKeys(body, ['directory', 'messageIds', 'state'], '请求体');
+        const directory = requireString(body.directory, 'directory', { max: MAX_DIRECTORY_LENGTH });
+        if (!Array.isArray(body.messageIds)) {
+          throw serviceError(400, 'INVALID_SESSION_MESSAGE_IDS', 'messageIds 必须是数组。');
+        }
+        const state = requireString(body.state, 'state', { max: 40 });
+        const result = await updateSessionInboxState(directory, body.messageIds, state);
+        sendJson(res, 200, { ok: true, updated: result.updated });
         return;
       }
 

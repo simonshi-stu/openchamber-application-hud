@@ -9,6 +9,7 @@ import {
   appendSessionMessage,
   readSessionInbox,
   SessionInboxError,
+  updateSessionMessageStates,
 } from './session-bridge.js';
 
 const ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -32,6 +33,39 @@ test('session bridge preserves message text and serializes concurrent writers', 
     (await readSessionInbox(directory)).map((message) => message.id).sort(),
     ['message-1', 'message-3'],
   );
+});
+
+test('session delivery state claims are durable and only an explicit retry releases review', async (t) => {
+  const directory = path.join(ROOT, 'private', `test-session-delivery-state-${randomUUID()}`);
+  await fs.mkdir(directory, { recursive: true });
+  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+
+  await appendSessionMessage(directory, '虚构待发送消息', {
+    newId: () => 'message-delivery-1',
+    now: () => '2026-10-28T00:00:03.000Z',
+  });
+  const firstClaim = await updateSessionMessageStates(directory, ['message-delivery-1'], 'needs_review');
+  assert.equal(firstClaim.updated, 1);
+  const secondClaim = await updateSessionMessageStates(directory, ['message-delivery-1'], 'needs_review');
+  assert.equal(secondClaim.updated, 0);
+  assert.equal((await readSessionInbox(directory))[0].deliveryState, 'needs_review');
+
+  const releasedForExplicitRetry = await updateSessionMessageStates(directory, ['message-delivery-1'], 'pending');
+  assert.equal(releasedForExplicitRetry.updated, 1);
+  assert.equal((await readSessionInbox(directory))[0].deliveryState, 'pending');
+  assert.equal((await updateSessionMessageStates(directory, ['message-delivery-1'], 'needs_review')).updated, 1);
+
+  const markedSent = await updateSessionMessageStates(directory, ['message-delivery-1'], 'sent');
+  assert.equal(markedSent.updated, 1);
+  assert.equal((await readSessionInbox(directory))[0].deliveryState, 'sent');
+  assert.equal((await updateSessionMessageStates(directory, ['message-delivery-1'], 'pending')).updated, 0);
+
+  await assert.rejects(
+    updateSessionMessageStates(directory, ['message-delivery-1'], 'not-a-state'),
+    (error) => error instanceof SessionInboxError && error.code === 'INVALID_SESSION_DELIVERY_STATE',
+  );
+  assert.equal((await readSessionInbox(directory))[0].deliveryState, 'sent');
+  assert.equal((await updateSessionMessageStates(directory, ['message-delivery-1'], 'pending')).updated, 0);
 });
 
 test('session bridge rejects corrupt files without replacing them', async (t) => {

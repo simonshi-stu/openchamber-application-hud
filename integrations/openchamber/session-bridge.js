@@ -7,6 +7,12 @@ export const SESSION_INBOX_FILE = 'session-inbox.json';
 export const SESSION_MESSAGE_MAX = 16000;
 export const SESSION_ID_MAX = 128;
 export const SESSION_INBOX_MAX = 100;
+export const SESSION_DELIVERY_STATE = Object.freeze({
+  pending: 'pending',
+  sent: 'sent',
+  needsReview: 'needs_review',
+});
+export const SESSION_DELIVERY_STATES = Object.freeze(Object.values(SESSION_DELIVERY_STATE));
 const SESSION_INBOX_LOCK = `${SESSION_INBOX_FILE}.lock`;
 const LOCK_WAIT_MS = 5000;
 const STALE_LOCK_MS = 30_000;
@@ -48,11 +54,17 @@ export async function readSessionInbox(appRoot) {
     throw new SessionInboxError('SESSION_INBOX_CORRUPT', '会话桥接队列超过安全上限；未覆盖原文件。');
   }
   const messages = document.messages.map((message, index) => {
+    const deliveryState = message && typeof message === 'object'
+      ? Object.hasOwn(message, 'deliveryState')
+        ? message.deliveryState
+        : SESSION_DELIVERY_STATE.pending
+      : null;
     if (!message || typeof message !== 'object'
       || typeof message.id !== 'string' || !message.id
       || typeof message.text !== 'string' || !message.text.trim()
       || message.text.length > SESSION_MESSAGE_MAX
       || typeof message.createdAt !== 'string' || !message.createdAt
+      || !SESSION_DELIVERY_STATES.includes(deliveryState)
       || (message.targetSessionId !== undefined
         && message.targetSessionId !== null
         && !isSessionId(message.targetSessionId))) {
@@ -63,6 +75,7 @@ export async function readSessionInbox(appRoot) {
       text: message.text,
       createdAt: message.createdAt,
       targetSessionId: message.targetSessionId || null,
+      deliveryState,
     };
   });
   if (new Set(messages.map((message) => message.id)).size !== messages.length) {
@@ -92,7 +105,13 @@ export async function appendSessionMessage(appRoot, text, {
     if (typeof id !== 'string' || !id || messages.some((message) => message.id === id)) {
       throw new SessionInboxError('SESSION_INBOX_CORRUPT', '无法生成唯一的会话桥接消息 ID；未覆盖原文件。');
     }
-    const message = { id, text, createdAt: now(), targetSessionId: target };
+    const message = {
+      id,
+      text,
+      createdAt: now(),
+      targetSessionId: target,
+      deliveryState: SESSION_DELIVERY_STATE.pending,
+    };
     await writeSessionInbox(appRoot, [...messages, message]);
     return message;
   });
@@ -127,6 +146,33 @@ export async function acknowledgeSessionMessages(appRoot, ids) {
     const remaining = messages.filter((message) => !idSet.has(message.id));
     if (remaining.length !== messages.length) await writeSessionInbox(appRoot, remaining);
     return { acknowledged: messages.length - remaining.length, remaining };
+  });
+}
+
+/**
+ * Atomically move delivery state forward or explicitly release a message for
+ * a user-authorized retry. The pending -> needs_review transition is the
+ * durable send-attempt guard: a HUD crash after this write must not cause a
+ * new HUD process to send the same host message automatically.
+ */
+export async function updateSessionMessageStates(appRoot, ids, nextState) {
+  validateMessageIds(ids);
+  if (!SESSION_DELIVERY_STATES.includes(nextState)) {
+    throw new SessionInboxError('INVALID_SESSION_DELIVERY_STATE', '会话桥接送达状态无效。');
+  }
+  const idSet = new Set(ids);
+  return withInboxLock(appRoot, async () => {
+    const messages = await readSessionInbox(appRoot);
+    let updated = 0;
+    const nextMessages = messages.map((message) => {
+      if (!idSet.has(message.id) || !canTransitionDeliveryState(message.deliveryState, nextState)) {
+        return message;
+      }
+      updated += 1;
+      return { ...message, deliveryState: nextState };
+    });
+    if (updated > 0) await writeSessionInbox(appRoot, nextMessages);
+    return { updated, remaining: nextMessages };
   });
 }
 
@@ -168,6 +214,28 @@ async function withInboxLock(appRoot, task) {
 
 function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function validateMessageIds(ids) {
+  if (!Array.isArray(ids) || ids.length === 0 || ids.length > SESSION_INBOX_MAX) {
+    throw new SessionInboxError('INVALID_SESSION_MESSAGE_IDS', '会话桥接确认 ID 列表无效。');
+  }
+  const idSet = new Set(ids.filter((id) => typeof id === 'string' && id));
+  if (idSet.size !== ids.length) {
+    throw new SessionInboxError('INVALID_SESSION_MESSAGE_IDS', '会话桥接确认 ID 列表包含无效值。');
+  }
+}
+
+function canTransitionDeliveryState(currentState, nextState) {
+  if (currentState === nextState) return false;
+  if (currentState === SESSION_DELIVERY_STATE.pending) {
+    return nextState === SESSION_DELIVERY_STATE.needsReview;
+  }
+  if (currentState === SESSION_DELIVERY_STATE.needsReview) {
+    return nextState === SESSION_DELIVERY_STATE.pending
+      || nextState === SESSION_DELIVERY_STATE.sent;
+  }
+  return false;
 }
 
 async function writeSessionInbox(appRoot, messages) {

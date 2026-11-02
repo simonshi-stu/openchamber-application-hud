@@ -242,6 +242,35 @@ test('session inbox bridges standalone messages and acknowledges only after deli
   assert.deepEqual(pending.body.messages.map(message => message.id), [appended.body.message.id]);
   assert.equal(pending.body.messages[0].text, '  独立 HUD 的虚构消息  ');
   assert.equal(pending.body.messages[0].targetSessionId, 'ses_virtual_service');
+  assert.equal(pending.body.messages[0].deliveryState, 'pending');
+
+  const claimed = await readResponse(await request(client, '/api/session-inbox/state', {
+    method: 'POST',
+    body: {
+      directory: client.project,
+      messageIds: [appended.body.message.id],
+      state: 'needs_review',
+    },
+  }));
+  assert.equal(claimed.status, 200, claimed.text);
+  assert.equal(claimed.body.updated, 1);
+
+  const review = await readResponse(await request(
+    client,
+    `/api/session-inbox?directory=${encodeURIComponent(client.project)}`,
+  ));
+  assert.equal(review.body.messages[0].deliveryState, 'needs_review');
+
+  const markedSent = await readResponse(await request(client, '/api/session-inbox/state', {
+    method: 'POST',
+    body: {
+      directory: client.project,
+      messageIds: [appended.body.message.id],
+      state: 'sent',
+    },
+  }));
+  assert.equal(markedSent.status, 200, markedSent.text);
+  assert.equal(markedSent.body.updated, 1);
 
   const acknowledged = await readResponse(await request(client, '/api/session-inbox/ack', {
     method: 'POST',
