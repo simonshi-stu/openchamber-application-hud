@@ -49,3 +49,15 @@ export {
 export { ISSUE_TYPES, ISSUE_STATUSES, groupIssues, openBlockingIssues } from './issues.js';
 export { TOOL_DEFINITIONS, ToolError, createToolRegistry, toolByName } from './tools.js';
 export { ValidationError, validateSchema } from './validation.js';
+export {
+  APPLICATION_LEDGER_SCHEMA_VERSION,
+  APPLICATION_BINDING_SCHEMA_VERSION,
+  APPLICATION_LEDGER_STATUS,
+  APPLICATION_LEDGER_EVIDENCE_KIND,
+  applicationLedgerDocumentSchema,
+  ApplicationLedgerError,
+  applicationIdentity,
+  createApplicationLedger,
+  digestValue,
+  validateApplicationLedgerDocument,
+} from './application-ledger.js';

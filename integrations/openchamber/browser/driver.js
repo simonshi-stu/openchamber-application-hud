@@ -554,7 +554,10 @@ export function createMokaDriverCore({ page, now = () => new Date(), closeImpl =
         });
       } catch (error) {
         const failure = pageFailure(error, 'WRITE_FAILED');
-        if (failure.code === 'TARGET_UNAVAILABLE' || failure.code === 'PAGE_TIMEOUT') {
+        // A thrown write has an unknown outcome: the page may have changed
+        // before the response was lost. Stop the batch rather than issuing
+        // more writes or making a later retry look exactly-once.
+        if (failure.code === 'WRITE_FAILED' || failure.code === 'TARGET_UNAVAILABLE' || failure.code === 'PAGE_TIMEOUT') {
           globalStop = { code: failure.code, message: failure.message };
         }
         const failed = { ...base, status: 'failed', code: failure.code, message: failure.message };
@@ -566,7 +569,7 @@ export function createMokaDriverCore({ page, now = () => new Date(), closeImpl =
       if (!response || response.ok !== true) {
         const code = typeof response?.code === 'string' ? response.code : 'WRITE_FAILED';
         const message = typeof response?.message === 'string' ? response.message : '页面拒绝写入。';
-        if (code === 'PAGE_URL_CHANGED') {
+        if (code === 'WRITE_FAILED' || code === 'PAGE_URL_CHANGED') {
           globalStop = { code, message };
         }
         const failed = {

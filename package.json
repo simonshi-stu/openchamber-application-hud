@@ -43,6 +43,7 @@
     "mcp": "node mcp/server.mjs",
     "build:openchamber": "node scripts/build-openchamber.mjs",
     "package:openchamber": "node scripts/build-openchamber.mjs && node scripts/package-openchamber.mjs",
+    "trial:hud-06": "node scripts/hud-06-local-ledger.mjs",
     "standalone:hud": "node scripts/standalone-hud.mjs",
     "check:publication": "node scripts/check-publication.mjs"
   },

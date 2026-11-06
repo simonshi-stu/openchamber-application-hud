@@ -99,6 +99,12 @@ function modelSignature(roles) {
   }));
 }
 
+function profileVersionFor(summary) {
+  if (Number.isInteger(summary?.profileVersion)) return summary.profileVersion;
+  if (Number.isInteger(summary?.profileRevision)) return summary.profileRevision;
+  return 0;
+}
+
 function factKeySections(key) {
   if (key === 'basic.name' || key === 'basic.phone' || key === 'basic.email') return { sections: ['basic'], label: key.split('.')[1], expectedSection: 'basic' };
   if (key === 'education.school') return { sections: ['education'], label: /学校|院校|school|university/i, expectedSection: 'education' };
@@ -287,7 +293,7 @@ export function createMokaWorkflow({
     if (latest?.queue?.status !== 'running' || latest.queue.currentCompanyId !== companyId) {
       throw new Error('运行公司或队列状态已变化；未写入旧任务结果。');
     }
-    if (Number.isInteger(profileVersion) && (latest.profileVersion || 0) !== profileVersion) {
+    if (Number.isInteger(profileVersion) && profileVersionFor(latest) !== profileVersion) {
       throw new Error('资料版本已变化；未写入旧任务结果。');
     }
     if (positionId) {
@@ -486,7 +492,7 @@ export function createMokaWorkflow({
     }));
     const { router } = await routerWithRoles();
     const facts = await factsFor(input.companyId);
-    const profileVersion = summary.profileVersion || 0;
+    const profileVersion = profileVersionFor(summary);
     const officialSnapshot = {
       sourceUrl: snapshot.sourceUrl,
       capturedAt: snapshot.capturedAt,
@@ -549,6 +555,19 @@ export function createMokaWorkflow({
     const snapshot = observed.snapshot;
     if (expectedUrl && observed.snapshot.pageUrl !== expectedUrl && !observed.snapshot.pageUrl.startsWith(expectedUrl.split('?')[0])) {
       throw new Error('当前页面与已保存岗位来源不一致；拒绝生成计划。');
+    }
+    for (const pageIssue of snapshot.issues || []) {
+      const code = String(pageIssue?.code || 'PAGE_OBSERVATION');
+      const safety = ['CREDENTIAL_FIELD_BLOCKED', 'UNSUPPORTED_UPLOAD'].includes(code);
+      const blocking = code === 'NO_WRITABLE_CONTROLS';
+      await raiseIssue(
+        input.companyId,
+        position.id,
+        `moka.page.${code}`,
+        safety ? 'safety' : (blocking ? 'blocking' : 'unknown'),
+        pageIssue?.message || '页面观察发现未处理控件；相关控件未进入填写计划。',
+        { blocking, evidence: code },
+      );
     }
     const facts = await factsFor(input.companyId, position.id);
     const semantic = suggestMokaFieldMappings(snapshot.controls);
@@ -639,7 +658,7 @@ export function createMokaWorkflow({
               grantId: operation.id,
               role: 'execute',
               companyId: input.companyId,
-              profileVersion: summary.profileVersion || 0,
+              profileVersion: profileVersionFor(summary),
               budget: createCallBudget({ maxCalls: 1, maxInputChars: 60000, maxOutputChars: 8000 }),
               sendScope: { factIds: facts.map((fact) => fact.id), controlIds: controls.map((item) => item.controlId), fieldKeys: [] },
             }),
@@ -647,11 +666,11 @@ export function createMokaWorkflow({
             facts,
             companyId: input.companyId,
             positionId: position.id,
-            profileVersion: summary.profileVersion || 0,
+            profileVersion: profileVersionFor(summary),
             signal,
           });
           throwIfAborted(signal);
-          await assertStillCurrent({ companyId: input.companyId, positionId: position.id, profileVersion: summary.profileVersion || 0 });
+          await assertStillCurrent({ companyId: input.companyId, positionId: position.id, profileVersion: profileVersionFor(summary) });
           for (const mapping of result.mappings) {
             const control = snapshot.controls.find((item) => item.ref === mapping.controlId);
             const fact = facts.find((item) => item.id === mapping.factId);
@@ -695,7 +714,7 @@ export function createMokaWorkflow({
     await refreshDigest(input.companyId);
     throwIfAborted(signal);
     if (!items.length) throw new Error('没有可安全填写的已确认字段；未生成计划，也未写入页面。');
-    await assertStillCurrent({ companyId: input.companyId, positionId: position.id, profileVersion: summary.profileVersion || 0 });
+    await assertStillCurrent({ companyId: input.companyId, positionId: position.id, profileVersion: profileVersionFor(summary) });
     const planId = `moka_plan_${newId()}`;
     const plan = validateMokaFillPlan({
       schemaVersion: MOKA_FILL_PLAN_SCHEMA_VERSION,
@@ -710,7 +729,7 @@ export function createMokaWorkflow({
       plan: plan.plan,
       companyId: input.companyId,
       positionId: position.id,
-      profileVersion: summary.profileVersion || 0,
+      profileVersion: profileVersionFor(summary),
       jobsSignature: modelSignature(await getRoles()),
       createdAt: now(),
       confirmed: false,
@@ -730,7 +749,7 @@ export function createMokaWorkflow({
       throw new Error('计划绑定的公司或岗位与当前任务不一致；拒绝执行。');
     }
     if (company.activePositionId !== cache.positionId) throw new Error('活动岗位已变化；拒绝旧计划。');
-    if ((summary.profileVersion || 0) !== cache.profileVersion) throw new Error('资料版本已变化；请重新准备计划。');
+    if (profileVersionFor(summary) !== cache.profileVersion) throw new Error('资料版本已变化；请重新准备计划。');
     if (modelSignature(await getRoles()) !== cache.jobsSignature) throw new Error('模型配置已变化；请重新准备计划。');
     if (!driver) throw new Error('受控 Moka 窗口未打开。');
     throwIfAborted(signal);
@@ -840,7 +859,8 @@ export function createMokaWorkflow({
     await refreshDigest(input.companyId);
     throwIfAborted(signal);
     reviewCache = {
-      passed: Boolean(review?.passed) && programDiffs.length === 0 && readback.ok,
+      passed: fillResult.ok === true && Boolean(review?.passed) && programDiffs.length === 0 && readback.ok,
+      fillOk: fillResult.ok === true,
       programDiffs,
       modelFindings: review?.modelFindings || [],
       readbackCapturedAt: readback.capturedAt || null,
@@ -880,6 +900,16 @@ export function createMokaWorkflow({
     opened = null;
   }
 
+  function invalidatePlan(reason = '本地资料已修改') {
+    if (operation?.status === 'running' || activeController) {
+      throw new Error('后台操作仍在运行；不能在未知结果期间使计划失效。');
+    }
+    const invalidated = Boolean(planCache);
+    planCache = null;
+    reviewCache = null;
+    return { invalidated, reason: String(reason || '本地资料已修改').slice(0, 200) };
+  }
+
   return {
     MOKA_WORKFLOW_COMMANDS,
     startOpen: (input) => runOperation('openMoka', input, () => open(input)),
@@ -894,6 +924,7 @@ export function createMokaWorkflow({
     },
     cancel,
     stop,
+    invalidatePlan,
     getState,
     getPlan(planId) {
       return planCache && planCache.planId === planId ? publicPlan(planCache.plan, planCache) : null;

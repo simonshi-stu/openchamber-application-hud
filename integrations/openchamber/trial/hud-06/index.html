@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="hud06-csrf" content="__HUD06_CSRF__" />
+    <meta name="hud05-csrf" content="__HUD06_CSRF__" />
+    <title>HUD-06 · 本地申请结果台账</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <div class="brand">
+          <div class="brand-mark" aria-hidden="true">AC</div>
+          <div>
+            <p class="eyebrow">APPLICATION COPILOT · HUD-06</p>
+            <h1>本地申请结果台账</h1>
+            <p class="muted">一家公司 · 一个虚构岗位 · 准备结果与本人报告 · 不提交</p>
+          </div>
+        </div>
+        <div class="top-meta">
+          <span id="synthetic-badge" class="badge badge-warning">SYNTHETIC</span>
+          <span id="offline-badge" class="badge badge-success">127.0.0.1 · OFFLINE</span>
+          <span id="stage-badge" class="badge badge-neutral">连接中</span>
+        </div>
+      </header>
+
+      <div id="banner" class="banner banner-warning" role="status" aria-live="polite">
+        本页只运行虚构 fixture。不会打开招聘站、读取真实简历、调用模型、发送 OpenChamber 消息或提供提交按钮。
+      </div>
+
+      <main>
+        <section class="progress card" aria-label="试用步骤">
+          <div class="section-title-row">
+            <div>
+              <p class="eyebrow">CONTROLLED LOOP</p>
+              <h2>每一步都由你单独确认</h2>
+            </div>
+            <div class="action-row compact-actions">
+              <button id="recover-button" class="button button-outline" type="button" hidden>重新观察并解除恢复阻断</button>
+              <button id="refresh-button" class="button button-ghost" type="button">刷新状态</button>
+            </div>
+          </div>
+          <ol id="steps" class="steps"></ol>
+          <p id="setup-note" class="muted small"></p>
+        </section>
+
+        <section class="card" aria-labelledby="material-title">
+          <div class="section-title-row">
+            <div>
+              <p class="eyebrow">01 · PROVENANCE</p>
+              <h2 id="material-title">材料来源与未确认候选</h2>
+            </div>
+            <span id="material-badge" class="badge badge-warning">未确认</span>
+          </div>
+          <div id="material-source" class="source-grid"></div>
+          <div id="candidate-card" class="candidate-card"></div>
+          <div class="action-row">
+            <button id="confirm-material-button" class="button button-primary" type="button">确认当前候选材料</button>
+            <button id="save-edit-button" class="button button-outline" type="button" hidden>保存修改并撤销确认</button>
+            <span id="material-action-note" class="muted small">确认前不能用于字段计划。</span>
+          </div>
+        </section>
+
+        <section id="position-section" class="card" aria-labelledby="position-title" hidden>
+          <div class="section-title-row">
+            <div>
+              <p class="eyebrow">02 · SCOPE</p>
+              <h2 id="position-title">选择一个虚构岗位</h2>
+            </div>
+            <span id="position-badge" class="badge badge-neutral">等待材料确认</span>
+          </div>
+          <div id="position-card" class="position-card"></div>
+          <div class="action-row">
+            <button id="select-position-button" class="button button-primary" type="button">选择此岗位</button>
+            <span class="muted small">岗位来源、官方 ID 与当前公司作用域固定为合成 fixture。</span>
+          </div>
+        </section>
+
+        <section id="plan-section" class="card" aria-labelledby="plan-title" hidden>
+          <div class="section-title-row">
+            <div>
+              <p class="eyebrow">03 · PLAN GATE</p>
+              <h2 id="plan-title">字段计划与页面写入</h2>
+            </div>
+            <span id="plan-badge" class="badge badge-neutral">尚未生成</span>
+          </div>
+          <div id="plan-empty" class="empty-state">选择岗位后，手动生成字段计划。</div>
+          <div id="plan-content" hidden>
+            <div id="plan-table" class="table-wrap"></div>
+          </div>
+          <div class="action-row">
+            <button id="prepare-plan-button" class="button button-outline" type="button">生成字段计划</button>
+            <button id="confirm-plan-button" class="button button-primary" type="button" hidden>确认当前字段计划</button>
+            <button id="run-fill-button" class="button button-primary" type="button" hidden>执行虚构填写并读回</button>
+            <span id="plan-action-note" class="muted small">不会自动批准或自动执行下一步。</span>
+          </div>
+        </section>
+
+        <section id="result-section" class="card" aria-labelledby="result-title" hidden>
+          <div class="section-title-row">
+            <div>
+              <p class="eyebrow">04 · EVIDENCE</p>
+              <h2 id="result-title">实际读回、程序 diff 与问题</h2>
+            </div>
+            <span id="result-badge" class="badge badge-neutral">等待执行</span>
+          </div>
+          <div class="evidence-grid">
+            <div>
+              <h3>fake page 实际状态</h3>
+              <div id="page-fields" class="stack"></div>
+              <h3 class="subheading">写入记录</h3>
+              <div id="page-writes" class="stack"></div>
+            </div>
+            <div>
+              <h3>程序 diff</h3>
+              <div id="diff-list" class="stack"></div>
+              <h3 class="subheading">问题中心</h3>
+              <div id="issue-list" class="stack"></div>
+            </div>
+          </div>
+        </section>
+
+        <section id="ledger-section" class="card ledger-card" aria-labelledby="ledger-title">
+          <div class="section-title-row">
+            <div>
+              <p class="eyebrow">05 · LOCAL LEDGER</p>
+              <h2 id="ledger-title">申请结果台账</h2>
+            </div>
+            <span id="ledger-status" class="badge badge-neutral">尚未产生准备结果</span>
+          </div>
+          <p id="ledger-storage" class="muted small">台账状态：读取中…</p>
+          <div id="ledger-identity" class="ledger-grid"></div>
+          <div class="ledger-actions">
+            <label class="field-inline" for="submission-reference">本人报告备注（本地）</label>
+            <input id="submission-reference" class="text-input" type="text" maxlength="500" placeholder="例如：虚构本人手工报告 REF-001" />
+            <button id="record-submission-button" class="button button-primary" type="button" disabled>记录本人已提交（本地）</button>
+            <label class="field-inline" for="unknown-reason">未知/无 ack 阻塞原因</label>
+            <input id="unknown-reason" class="text-input" type="text" maxlength="500" value="没有可信官网回执或 ack；保留未知。" />
+            <button id="record-unknown-button" class="button button-outline" type="button" disabled>记录结果未知</button>
+          </div>
+          <div id="ledger-evidence" class="stack"></div>
+          <h3 class="subheading">状态历史（不抹除材料/回执变更）</h3>
+          <div id="ledger-history" class="stack"></div>
+          <p id="official-verification-note" class="ledger-note">官网回执已核验只接受带可信官方观测、ack 和当前材料/计划版本的结构化证据；手工报告、无 ack、unknown 或损坏台账不会自动升级。</p>
+        </section>
+
+        <section class="card" aria-labelledby="report-title">
+          <div class="section-title-row">
+            <div>
+              <p class="eyebrow">06 · REPORT</p>
+              <h2 id="report-title">本地运行报告</h2>
+            </div>
+            <span class="badge badge-success">LOCAL PRIVATE</span>
+          </div>
+          <p id="report-path" class="muted small"></p>
+          <pre id="report-content" class="report">正在读取本地台账报告…</pre>
+        </section>
+
+        <section class="card" aria-labelledby="audit-title">
+          <div class="section-title-row">
+            <div>
+              <p class="eyebrow">AUDIT</p>
+              <h2 id="audit-title">交互事件</h2>
+            </div>
+            <span class="muted small">setup 与 interactive user action 分开记录</span>
+          </div>
+          <div id="event-list" class="event-list"></div>
+        </section>
+      </main>
+
+      <footer class="footer-note">
+        HUD-06 只保存本地准备结果与本人报告。没有登录、验证码、附件上传、真实提交、自动重投或真实官网访问入口。
+      </footer>
+    </div>
+    <script src="./base.js" defer></script>
+    <script src="./ledger.js" defer></script>
+  </body>
+</html>

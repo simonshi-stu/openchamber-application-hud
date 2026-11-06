@@ -368,6 +368,83 @@ export function createProfileStore({
     });
   }
 
+  async function reviseFacts(changes = [], context) {
+    assertOperator(context, 'reviseFacts');
+    return serial(async () => {
+      await ensure();
+      if (!Array.isArray(changes) || changes.length === 0) {
+        throw new WorkflowError('INVALID_FACT', '至少需要一个资料字段修改。');
+      }
+      const seen = new Set();
+      const revisedFacts = [];
+      for (const change of changes) {
+        if (!change || typeof change !== 'object' || Array.isArray(change)) {
+          throw new WorkflowError('INVALID_FACT', '资料字段修改必须是对象。');
+        }
+        const factId = change.factId;
+        if (typeof factId !== 'string' || !factId || seen.has(factId)) {
+          throw new WorkflowError('INVALID_FACT', '资料字段修改必须使用不重复的 factId。');
+        }
+        seen.add(factId);
+        const fact = byId.get(factId);
+        if (!fact) throw new WorkflowError('FACT_NOT_FOUND', '资料字段不存在。');
+        if (change.expectedVersion !== fact.version) {
+          throw new WorkflowError('PROFILE_VERSION_CONFLICT', `字段版本已变化（期望 ${change.expectedVersion}，实际 ${fact.version}）；未覆盖。`);
+        }
+        const patch = change.patch && typeof change.patch === 'object' && !Array.isArray(change.patch)
+          ? change.patch
+          : {};
+        const allowedKeys = ['entityId', 'label', 'value', 'section', 'scope', 'sensitivity', 'allowedPurposes'];
+        for (const key of Object.keys(patch)) {
+          if (!allowedKeys.includes(key)) throw new WorkflowError('FIELD_PROTECTED', `字段属性 ${key} 不允许修改。`);
+        }
+        const merged = normalizeFactInput({ ...fact, ...patch, source: fact.source }, now());
+        const historyEntry = {
+          version: fact.version,
+          entityId: fact.entityId ?? null,
+          label: fact.label,
+          value: fact.value,
+          confirmed: fact.confirmed,
+          confirmedAt: fact.confirmedAt,
+          scope: clone(fact.scope),
+          sensitivity: fact.sensitivity,
+          allowedPurposes: [...fact.allowedPurposes],
+          at: now(),
+        };
+        const revised = {
+          ...fact,
+          ...merged,
+          version: fact.version + 1,
+          confirmed: false,
+          confirmedAt: null,
+          confirmedVersion: null,
+          history: [...fact.history, historyEntry].slice(-50),
+          updatedAt: now(),
+        };
+        validateSchema(revised, factSchema);
+        revisedFacts.push(revised);
+      }
+      await mutate(state => {
+        for (const revised of revisedFacts) {
+          const index = state.facts.findIndex(item => item.id === revised.id);
+          state.facts[index] = revised;
+          // Content revisions revoke every grant that included the changed fact.
+          const grants = [];
+          for (const grant of state.grants) {
+            if (!grant.factIds.includes(revised.id)) {
+              grants.push(grant);
+              continue;
+            }
+            grant.factIds = grant.factIds.filter(id => id !== revised.id);
+            if (grant.factIds.length) grants.push(grant);
+          }
+          state.grants = grants;
+        }
+      });
+      return clone(revisedFacts);
+    });
+  }
+
   async function confirmFact(factId, { expectedVersion } = {}, context) {
     assertOperator(context, 'confirmFact');
     return serial(async () => {
@@ -391,6 +468,49 @@ export function createProfileStore({
         state.facts[index] = confirmed;
       });
       return clone(confirmed);
+    });
+  }
+
+  async function confirmFacts(confirmations = [], context) {
+    assertOperator(context, 'confirmFacts');
+    return serial(async () => {
+      await ensure();
+      if (!Array.isArray(confirmations) || confirmations.length === 0) {
+        throw new WorkflowError('INVALID_FACT', '至少需要确认一个资料字段。');
+      }
+      const seen = new Set();
+      const confirmedFacts = [];
+      for (const confirmation of confirmations) {
+        if (!confirmation || typeof confirmation !== 'object' || Array.isArray(confirmation)) {
+          throw new WorkflowError('INVALID_FACT', '资料确认必须是对象。');
+        }
+        const factId = confirmation.factId;
+        if (typeof factId !== 'string' || !factId || seen.has(factId)) {
+          throw new WorkflowError('INVALID_FACT', '资料确认必须使用不重复的 factId。');
+        }
+        seen.add(factId);
+        const fact = byId.get(factId);
+        if (!fact) throw new WorkflowError('FACT_NOT_FOUND', '资料字段不存在。');
+        if (confirmation.expectedVersion !== fact.version) {
+          throw new WorkflowError('PROFILE_VERSION_CONFLICT', `字段版本已变化（期望 ${confirmation.expectedVersion}，实际 ${fact.version}）；未确认。`);
+        }
+        const confirmed = {
+          ...fact,
+          confirmed: true,
+          confirmedAt: now(),
+          confirmedVersion: fact.version,
+          updatedAt: now(),
+        };
+        validateSchema(confirmed, factSchema);
+        confirmedFacts.push(confirmed);
+      }
+      await mutate(state => {
+        for (const confirmed of confirmedFacts) {
+          const index = state.facts.findIndex(item => item.id === confirmed.id);
+          state.facts[index] = confirmed;
+        }
+      });
+      return clone(confirmedFacts);
     });
   }
 
@@ -528,7 +648,9 @@ export function createProfileStore({
   return {
     createFact,
     reviseFact,
+    reviseFacts,
     confirmFact,
+    confirmFacts,
     grantSensitiveUse,
     queryFacts,
     getFact,

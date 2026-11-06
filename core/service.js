@@ -1355,10 +1355,16 @@ export function createWorkbenchService({
     skipCompany,
     createProfileFact: (input, context) => profile.createFact(input, context),
     reviseProfileFact: (input, context) => profile.reviseFact(input.factId, input.patch, { expectedVersion: input.expectedVersion }, context),
+    reviseProfileFacts: (input, context) => profile.reviseFacts(input.changes, context),
     confirmProfileFact: (input, context) => {
       assertOperator(context, 'confirmProfileFact');
       assertHumanConfirmation(input, '确认资料字段');
       return profile.confirmFact(input.factId, { expectedVersion: input.expectedVersion }, context);
+    },
+    confirmProfileFacts: (input, context) => {
+      assertOperator(context, 'confirmProfileFacts');
+      assertHumanConfirmation(input, '确认资料字段');
+      return profile.confirmFacts(input.confirmations, context);
     },
     grantSensitiveFactUse: (input, context) => profile.grantSensitiveUse(input, context),
     queryProfileFacts,

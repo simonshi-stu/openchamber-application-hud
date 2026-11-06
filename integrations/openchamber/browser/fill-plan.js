@@ -173,8 +173,10 @@ export function validateMokaFillPlan(rawPlan) {
       issues.push(issue('INVALID_FIELD_KEY', 'fieldKey 无效。', `${path}.fieldKey`));
     }
 
-    const hasOptionValue = rawItem.optionValue !== undefined;
-    const hasOptionLabel = rawItem.optionLabel !== undefined;
+    // The canonical form returned below uses null for non-select options. Treat
+    // that form as absent when the plan is validated again by the driver.
+    const hasOptionValue = rawItem.optionValue !== undefined && rawItem.optionValue !== null;
+    const hasOptionLabel = rawItem.optionLabel !== undefined && rawItem.optionLabel !== null;
     if (hasOptionValue !== hasOptionLabel) {
       issues.push(issue('INCOMPLETE_OPTION', 'optionValue 与 optionLabel 必须同时提供。', `${path}.optionValue`));
     }
